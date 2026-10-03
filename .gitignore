@@ -1,0 +1,28 @@
+# build artifacts
+# binary
+bin/
+release/
+
+/dist/
+/stt
+/stt-go
+*.exe
+
+# local secrets / configuration
+.env
+
+# task runner cache
+.task/
+
+# test / coverage
+*.test
+*.out
+coverage.txt
+
+# local databases
+*.db
+*.db-shm
+*.db-wal
+
+# editor / OS
+.DS_Store
