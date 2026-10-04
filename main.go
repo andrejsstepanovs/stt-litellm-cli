@@ -22,7 +22,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -607,12 +609,35 @@ var clipboardCmds = [][]string{
 	{"xclip", "-selection", "clipboard"},
 	{"xsel", "--clipboard", "--input"},
 	{"pbcopy"},
+	{"cmd", "/c", "clip"}, // windows fallback
 }
 
 func copyToClipboard(text string) bool {
+	// Native clipboard API first (windows, macOS, X11).
+	if err := clipboard.WriteAll(text); err == nil {
+		return true
+	}
 	for _, parts := range clipboardCmds {
 		c := exec.Command(parts[0], parts[1:]...)
-		c.Stdin = strings.NewReader(text)
+		if runtime.GOOS == "windows" {
+			// clip.exe interprets stdin using the console codepage unless a
+			// UTF-16LE BOM is present, so transcode to keep non-ASCII intact.
+			var buf bytes.Buffer
+			buf.WriteString("\xff\xfe")
+			for _, r := range text {
+				r1, r2 := utf16.EncodeRune(r)
+				if r1 == 0xfffd && r2 == 0xfffd {
+					r1, r2 = r, 0
+				}
+				binary.Write(&buf, binary.LittleEndian, uint16(r1))
+				if r2 != 0 {
+					binary.Write(&buf, binary.LittleEndian, uint16(r2))
+				}
+			}
+			c.Stdin = &buf
+		} else {
+			c.Stdin = strings.NewReader(text)
+		}
 		if err := c.Run(); err == nil {
 			return true
 		}
