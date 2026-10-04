@@ -101,6 +101,28 @@ tasks:
           GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "{{.LDFLAGS}}" -o "dist/{{.BINARY}}_v{{.VERSION}}_${os}_${arch}${ext}" .
         done
 
+  tray:
+    desc: Build the tray quick-action app for the current platform
+    cmds:
+      - mkdir -p dist
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o dist/{{.BINARY}}-tray{{if eq OS "windows"}}.exe{{end}} ./cmd/stt-tray
+
+  tray:all:
+    desc: Cross-compile the tray app for all platforms into dist/
+    cmds:
+      - mkdir -p dist
+      - |
+        set -e
+        targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+        for t in $targets; do
+          os=${t%/*}; arch=${t#*/}
+          ext=""
+          [ "$os" = "windows" ] && ext=".exe"
+          echo "building tray $os/$arch"
+          # note: darwin requires cgo (build on a Mac); the rest are pure Go
+          GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "{{.LDFLAGS}}" -o "dist/{{.BINARY}}-tray_v{{.VERSION}}_${os}_${arch}${ext}" ./cmd/stt-tray || echo "(failed: $os/$arch — see README)"
+        done
+
   tools:
     desc: Install the release tooling
     cmds:

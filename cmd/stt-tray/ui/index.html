@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>stt — speech to text</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: #12151a; color: #e6e6e6;
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 16px; margin: 0 0 12px; color: #ff64b8; display: flex; align-items: center; gap: 8px; }
+  h1 small { color: #888; font-weight: normal; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; display: inline-block; }
+  .dot.ok { background: #43a047; } .dot.bad { background: #e53935; }
+  .card { background: #1a1f27; border: 1px solid #2a303b; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  button {
+    background: #2d3644; color: #e6e6e6; border: 1px solid #3d4757; border-radius: 6px;
+    padding: 8px 14px; font-size: 14px; cursor: pointer; margin-right: 6px;
+  }
+  button:hover { background: #39455a; }
+  button.primary { background: #b03060; border-color: #b03060; font-weight: bold; }
+  button.primary:hover { background: #d04070; }
+  button.danger { background: #7a2030; border-color: #903040; }
+  button:disabled { opacity: .45; cursor: default; }
+  input, select, textarea {
+    background: #12151a; color: #e6e6e6; border: 1px solid #2a303b;
+    border-radius: 6px; padding: 7px 9px; font: inherit; width: 100%;
+  }
+  textarea { resize: vertical; min-height: 110px; font-family: inherit; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .row > label { color: #9aa3b2; min-width: 62px; font-size: 12px; }
+  .elapsed { font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rec { color: #ff5252; } .tx { color: #40c4ff; } .okT { color: #66bb6a; } .errT { color: #ff5252; } .warnT { color: #ffb300; }
+  .muted { color: #7d8590; font-size: 12px; }
+  .meter { height: 8px; background: #22272f; border-radius: 4px; overflow: hidden; flex: 1; }
+  .meter > div { height: 100%; background: linear-gradient(90deg, #43a047, #ffb300 75%, #e53935); width: 0%; transition: width .1s linear; }
+  .prog { height: 10px; background: #22272f; border-radius: 5px; overflow: hidden; }
+  .prog > div { height: 100%; background: #40c4ff; width: 0%; transition: width .3s linear; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px; background: #1d3320; color: #66bb6a; }
+  .list { max-height: 260px; overflow-y: auto; }
+  .item { padding: 7px 9px; border-radius: 6px; cursor: pointer; border-bottom: 1px solid #22272f; }
+  .item:hover { background: #232a35; }
+  .item .t { color: #7d8590; font-size: 11px; }
+  .item .s { color: #888; font-size: 11px; float: right; }
+  .item.fail .s { color: #ff8a80; }
+  .del { float: right; color: #7d8590; cursor: pointer; margin-left: 10px; padding: 0 4px; }
+  .del:hover { color: #ff5252; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid #40c4ff; border-top-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  .hide { display: none; }
+  pre.wrap { white-space: pre-wrap; word-break: break-word; font: inherit; margin: 4px 0; }
+</style>
+</head>
+<body>
+  <h1>stt <small>speech to text · <span id="ver"></span></small> <span style="flex:1"></span> <span class="dot" id="healthDot" title="checking…"></span></h1>
+
+  <!-- status / action card -->
+  <div class="card" id="statusCard"></div>
+
+  <!-- history -->
+  <div class="card">
+    <div class="row" style="justify-content: space-between">
+      <b>History</b>
+      <span>
+        <button id="tabOk" onclick="loadHistory(0)">Recent</button>
+        <button id="tabFail" onclick="loadHistory(1)">Failed</button>
+        <button id="clearFail" class="hide danger" onclick="clearFailed()">🗑 Clear all</button>
+      </span>
+    </div>
+    <div class="list" id="histList"><div class="muted">empty</div></div>
+  </div>
+
+  <!-- settings -->
+  <div class="card">
+    <div class="row"><label>Model</label><input id="model" placeholder="STT_MODEL"></div>
+    <div class="row"><label>Microphone</label>
+      <select id="device"></select>
+      <button onclick="loadDevices(true)">↻</button>
+    </div>
+    <div class="row muted" id="cfgInfo"></div>
+  </div>
+
+<script>
+let st = null, info = null, pollTimer = null, histFailed = 0, editOpen = false, lastKey = null, entryMode = false, lastHealth = 0;
+
+const $ = id => document.getElementById(id);
+const get = p => fetch('/api/' + p).then(r => r.json());
+const post = (p, body) => fetch('/api/' + p, {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify(body ?? {})
+}).then(r => r.json());
+
+function fmtMs(ms) {
+  if (ms == null) return '0:00';
+  const s = Math.floor(ms / 1000);
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+function fmtSec(ms) { return (ms / 1000).toFixed(3) + 's'; }
+function esc(s) { return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+function setText(id, t) { const e = $(id); if (e) e.textContent = t; }
+function setW(id, pct) { const e = $(id); if (e) e.style.width = pct + '%'; }
+function show(id, on) { const e = $(id); if (e) e.classList.toggle('hide', !on); }
+
+async function loadInfo() {
+  info = await get('info');
+  $('ver').textContent = info.version;
+  if (!$('model').value) $('model').value = localStorage.getItem('model') || info.model || '';
+  $('cfgInfo').textContent = `proxy: ${info.proxy || '(unset)'} · ffmpeg: ${info.ffmpeg ? 'found' : 'missing'} · db: ${info.db}`;
+  if (!info.ffmpeg) $('cfgInfo').className = 'row warnT';
+  loadDevices(false);
+  poll();
+}
+
+async function loadDevices(force) {
+  const prev = localStorage.getItem('device') || info.device || '';
+  const d = await get('devices' + (force ? '?refresh=1' : ''));
+  const sel = $('device');
+  sel.innerHTML = '<option value="">— default (STT_DEVICE) —</option>' +
+    d.devices.map(n => `<option>${n.replaceAll('"','&quot;')}</option>`).join('');
+  if (prev) sel.value = prev;
+  if (sel.value === '' && prev) sel.value = prev;
+}
+
+async function loadHealth() {
+  const h = await get('health');
+  $('healthDot').className = 'dot ' + (h.ok ? 'ok' : 'bad');
+  $('healthDot').title = h.ok ? 'litellm ready' : 'litellm not ready: ' + h.detail;
+}
+
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    st = await get('status');
+    renderStatus();
+  } catch (e) { /* server briefly busy */ }
+  const busy = st && ['starting','recording','stopping','transcribing'].includes(st.state);
+  pollTimer = setTimeout(poll, busy ? 250 : 1500);
+  // health checks go out to the proxy — keep them rare, they used to flood
+  // the browser's connection pool and stall the status poll (UI lag).
+  const now = Date.now();
+  if (now - lastHealth > 10000) { lastHealth = now; loadHealth(); }
+}
+
+function record() {
+  const model = $('model').value.trim(), device = $('device').value;
+  localStorage.setItem('model', model); localStorage.setItem('device', device);
+  entryMode = false;
+  post('record', {model, device}).then(poll);
+}
+
+// A full re-render replaces the DOM, which would swallow clicks on buttons.
+// So: re-render only when something structural changes (stateKey), and poke
+// the moving numbers in place every poll.
+function stateKey() {
+  if (entryMode || !st) return 'entry';
+  let k = st.state;
+  if (st.state === 'recording') k += '|p' + (st.paused ? 1 : 0);
+  if (st.state === 'result') k += '|' + st.recID + '|' + (st.text || '') + '|' + (st.err || '');
+  if (editOpen) k += '|edit';
+  return k;
+}
+
+function renderStatus() {
+  if (stateKey() !== lastKey) { lastKey = stateKey(); renderCard(); }
+  if (!st) return;
+  if (st.state === 'recording') {
+    setText('elapsed', fmtMs(st.elapsedMs));
+    setW('meterFill', Math.min(100, (st.peak || 0) / 32767 * 100));
+    show('micWarn', !!st.micWarn);
+  }
+  if (st.state === 'transcribing') {
+    setText('elapsed', fmtMs(st.elapsedMs));
+    if (st.hasEst) setW('progFill', Math.min(99, 100 * st.elapsedMs / st.estMs));
+  }
+}
+
+function renderCard() {
+  const c = $('statusCard');
+  if (entryMode) return; // entry detail is rendered by openEntry()
+
+  if (st.state === 'idle') {
+    c.innerHTML = `<div class="row" style="justify-content:center; padding: 18px 0">
+          <button class="primary" style="font-size:17px; padding:12px 26px" onclick="record()">● Record</button>
+         </div><div class="muted" style="text-align:center">or click the tray icon</div>`;
+  } else if (st.state === 'starting') {
+    c.innerHTML = `<span class="spin"></span> <b>Initializing microphone…</b><div class="muted">waiting for the device to start capturing</div>
+         <div class="row" style="margin-top:10px"><button onclick="post('cancel').then(poll)">Cancel</button></div>`;
+  } else if (st.state === 'recording') {
+    c.innerHTML = `<div class="row"><span class="elapsed rec" id="elapsed">${fmtMs(st.elapsedMs)}</span>
+           ${st.paused ? '<span class="okT">⏸ paused</span>' : '<span class="rec">● REC</span>'}</div>
+         <div class="row"><span class="muted" style="min-width:34px">mic</span><div class="meter"><div id="meterFill" style="width:${Math.min(100, (st.peak||0)/32767*100)}%"></div></div></div>
+         <div id="micWarn" class="warnT ${st.micWarn ? '' : 'hide'}">no audio detected — check your microphone</div>
+         <div class="row" style="margin-top:10px">
+           <button class="primary" onclick="post('stop').then(poll)">■ Stop &amp; transcribe</button>
+           <button onclick="post('pause').then(poll)">${st.paused ? '▶ Resume' : '⏸ Pause'}</button>
+           <button class="danger" onclick="post('cancel').then(poll)">Cancel</button>
+         </div>`;
+  } else if (st.state === 'stopping') {
+    c.innerHTML = `<span class="spin"></span> <b>Finalizing…</b><div class="muted">closing the audio file</div>`;
+  } else if (st.state === 'transcribing') {
+    const pct = st.hasEst ? Math.min(99, 100 * st.elapsedMs / st.estMs) : 0;
+    c.innerHTML = `<div class="row"><span class="spin"></span> <b class="tx">Transcribing</b> <span class="tx" id="elapsed" style="font-size:22px; font-weight:600">${fmtMs(st.elapsedMs)}</span></div>
+         <div class="prog"><div id="progFill" style="width:${pct}%"></div></div>
+         <div class="muted">${st.hasEst ? 'estimated ' + fmtSec(st.estMs) + ' · ' + st.estDescribe : 'estimating from history (none yet)'}</div>`;
+  } else if (st.state === 'result') {
+    if (st.err) {
+      c.innerHTML = `<div class="errT">✗ ${esc(st.err)}</div>
+           <div class="row" style="margin-top:10px">
+             ${st.retryable ? `<button class="primary" onclick="post('retry',{id:${st.recID}})">↻ Retry</button>` : ''}
+             <button onclick="record()">● New recording</button>
+           </div>`;
+    } else if (st.empty) {
+      c.innerHTML = `<div class="warnT">nothing transcribed — audio kept, you can retry</div>
+           <div class="row" style="margin-top:10px">
+             <button class="primary" onclick="post('retry',{id:${st.recID}})">↻ Retry</button>
+             <button onclick="record()">● New recording</button>
+           </div>`;
+    } else {
+      c.innerHTML = `<div class="row" style="justify-content:space-between">
+             <span class="badge">✓ copied to clipboard</span>
+             <span class="muted">audio ${fmtSec(st.audioMs)} · transcribed ${fmtSec(st.actualMs)}</span></div>
+           ${editOpen
+             ? `<textarea id="txt" style="margin:6px 0">${esc(st.text)}</textarea>`
+             : `<pre class="wrap" id="txt">${esc(st.text)}</pre>`}
+           <div class="row" style="margin-top:8px">
+             ${editOpen
+               ? '<button class="primary" onclick="saveEdit()">Save</button><button onclick="editOpen=false;lastKey=null;renderStatus()">Cancel</button>'
+               : '<button onclick="startEdit()">✎ Edit</button>'}
+             <button onclick="copyText(document.getElementById('txt').value)">⧉ Copy</button>
+             <button onclick="record()">● New recording</button>
+           </div>`;
+    }
+  }
+}
+
+function startEdit() { editOpen = true; lastKey = null; renderStatus(); }
+async function saveEdit() {
+  await post('edit', {id: st.recID, text: $('txt').value});
+  editOpen = false; lastKey = null; poll();
+}
+
+async function copyText(t) { await post('copy', {text: t}); }
+
+async function loadHistory(failed) {
+  histFailed = failed;
+  $('tabOk').style.borderColor = failed ? '' : '#ff64b8';
+  $('tabFail').style.borderColor = failed ? '' : '#ff64b8';
+  $('clearFail').classList.toggle('hide', !failed);
+  const h = await get('history' + (failed ? '?failed=1' : ''));
+  const list = $('histList');
+  if (!h.entries.length) { list.innerHTML = '<div class="muted">empty</div>'; return; }
+  list.innerHTML = h.entries.map(e => `
+    <div class="item ${failed ? 'fail' : ''}" onclick="openEntry(${e.ID})">
+      ${failed ? `<span class="del" title="delete" onclick="event.stopPropagation();delEntry(${e.ID})">✕</span>` : ''}
+      <span class="s">${failed ? (e.ErrMsg || e.Status) : e.Status}</span>
+      <div>${esc((e.Text || '(no text)').slice(0, 90))}</div>
+      <div class="t">${new Date(e.Created).toLocaleString()} · ${e.Model} · audio ${fmtSec(e.AudioMs)}</div>
+    </div>`).join('');
+}
+
+async function delEntry(id) { await post('delete', {id}); loadHistory(histFailed); if (entryMode) closeEntry(); poll(); }
+
+async function clearFailed() {
+  const n = (await get('history?failed=1')).entries.length;
+  if (!n || !confirm(`Delete all ${n} failed/empty recordings?`)) return;
+  await post('clear_failed');
+  loadHistory(1);
+  poll();
+}
+
+async function openEntry(id) {
+  const h = await get('history' + (histFailed ? '?failed=1' : ''));
+  const e = h.entries.find(e => e.ID === id);
+  if (!e) return;
+  entryMode = true; lastKey = 'entry';
+  $('statusCard').innerHTML = `
+    <div class="row" style="justify-content:space-between">
+      <b>Entry #${e.ID}</b><span class="muted">${new Date(e.Created).toLocaleString()} · ${e.Model}</span></div>
+    ${e.ErrMsg ? `<div class="errT">${esc(e.ErrMsg)}</div>` : ''}
+    <textarea id="etxt" style="margin:8px 0">${esc(e.Text)}</textarea>
+    <div class="row">
+      <button class="primary" onclick="saveEntry(${e.ID})">Save</button>
+      <button onclick="copyText(document.getElementById('etxt').value)">⧉ Copy</button>
+      ${e.Status !== 'success' ? `<button onclick="entryMode=false;lastKey=null;post('retry',{id:${e.ID}}).then(()=>poll())">↻ Retry</button>` : ''}
+      <button class="danger" onclick="delEntry(${e.ID})">🗑 Delete</button>
+      <button onclick="closeEntry()">Close</button>
+    </div>`;
+}
+
+function closeEntry() { entryMode = false; lastKey = null; renderStatus(); }
+
+async function saveEntry(id) {
+  await post('edit', {id, text: $('etxt').value});
+  closeEntry();
+  loadHistory(histFailed);
+  poll();
+}
+
+loadInfo();
+loadHistory(0);
+</script>
+</body>
+</html>

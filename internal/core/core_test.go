@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 
 func TestCopyToClipboard(t *testing.T) {
 	text := "héllo wörld — stt ✓"
-	if !copyToClipboard(text) {
+	if !CopyToClipboard(text) {
 		t.Fatal("copyToClipboard returned false")
 	}
 }
